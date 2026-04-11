@@ -55,7 +55,7 @@ Each domain error maps to a different HTTP status code. A switch with `errors.Is
 ### Key technical decisions and tradeoffs
 
 **Native JWT over a library**
-HMAC-SHA256 JWT is ~60 lines of `crypto/hmac` + `crypto/sha256` + base64. Using a library (golang-jwt) adds a transitive dependency for something that is fundamentally "hash a JSON payload.The implementation uses `hmac.Equal` for constant-time signature comparison to prevent timing attacks. Tradeoff: no RS256 or JWKS support, which would be needed for multi-service auth.
+HMAC-SHA256 JWT is ~60 lines of `crypto/hmac` + `crypto/sha256` + base64. Using a library (golang-jwt) adds a transitive dependency for something that is fundamentally "hash a JSON payload." The implementation uses `hmac.Equal` for constant-time signature comparison to prevent timing attacks. Tradeoff: no RS256 or JWKS support, which would be needed for multi-service auth.
 
 **CHECK constraints over PostgreSQL ENUMs**
 `CHECK (status IN ('todo','in_progress','done'))` is plain DDL — adding or removing a value is a single `ALTER TABLE` that can run inside a transaction. PostgreSQL ENUMs cannot be modified transactionally and require a multi-step migration. Tradeoff: the constraint is not enforced at the Go type level (only at the DB level), so an invalid string reaches Postgres before being rejected.
@@ -80,7 +80,7 @@ Both "email not found" and "wrong password" return `401 Unauthorized` with the s
 
 ## 3. Running Locally
 
-Requires only Docker. No Go, no PostgreSQL, no other tooling.
+Requires only **Docker**. No Go, no PostgreSQL, no other tooling needed.
 
 ```bash
 git clone https://github.com/yubrajnag/taskflow.git
@@ -88,6 +88,8 @@ cd taskflow
 cp .env.example .env
 docker compose up --build
 ```
+
+All variables in `.env.example` have sensible defaults — no edits are needed for local testing. The only value worth changing for production is `JWT_SECRET`.
 
 The app is available at **http://localhost:8080**
 
@@ -122,14 +124,7 @@ SQL migration files are embedded into the Go binary via `go:embed`. On each star
 {"level":"INFO","msg":"migrations complete"}
 ```
 
-To roll back all migrations manually (requires Go 1.23 installed):
-
-```bash
-cd backend
-go run ./cmd/server migrate-down  # not implemented — use psql directly if needed
-```
-
-Or drop and recreate via Docker:
+To start fresh:
 
 ```bash
 docker compose down -v   # wipes the pgdata volume
@@ -138,47 +133,19 @@ docker compose up        # migrations re-run from scratch on next start
 
 ---
 
-## 5. Test Credentials
-
-Load seed data after first `docker compose up`:
-
-```bash
-docker compose exec db psql -U taskflow -d taskflow -f /seed/seed.sql
-```
-
-| | |
-|---|---|
-| **Email** | `test@example.com` |
-| **Password** | `password123` |
-
-The seed creates:
-- 1 user (above credentials)
-- 1 project: "TaskFlow MVP"
-- 3 tasks in different statuses: `done`, `in_progress`, `todo`
-
----
-
-## 6. API Reference
-
-A Postman collection is included in the repo: **[`taskflow.postman_collection.json`](taskflow.postman_collection.json)**
-
-**How to use it:**
-1. Open Postman → click **Import** → select `taskflow.postman_collection.json` from the project root
-2. Run **Auth → POST /auth/login** (uses the seed credentials by default)
-3. The token is saved automatically into the `token` collection variable — all other requests are ready to fire
-4. Creating a project saves its ID into `project_id`; creating a task saves into `task_id` — no copy-pasting needed
-
-To change the base URL (e.g. staging), edit the `base_url` collection variable (default: `http://localhost:8080`).
+## 5. API Reference
 
 **Base URL:** `http://localhost:8080`
 
 ### Response envelope
 
+Every response wraps its payload consistently:
+
 ```json
 { "data": { ... } }
 { "data": [...], "meta": { "page": 1, "limit": 20, "total": 42 } }
 { "error": "not found" }
-{ "error": "validation failed", "fields": { "email": "is required" } }
+{ "error": "validation failed", "fields": { "title": "is required" } }
 ```
 
 ### Endpoints
@@ -200,28 +167,287 @@ To change the base URL (e.g. staging), edit the `base_url` collection variable (
 | `PUT` | `/tasks/:id` | ✓ | Partial update — send only the fields to change |
 | `DELETE` | `/tasks/:id` | ✓ owner | Delete task (project owner only) |
 
-**Task fields:** `title` (required), `description`, `status` (`todo` \| `in_progress` \| `done`, default `todo`), `priority` (`low` \| `medium` \| `high`, default `medium`), `assignee_id` (UUID), `due_date` (RFC3339).
+**Task fields:** `title` (required), `description`, `status` (`todo` | `in_progress` | `done`, default `todo`), `priority` (`low` | `medium` | `high`, default `medium`), `assignee_id` (UUID), `due_date` (RFC3339).
 
-### Example: Register and create a project
+---
+
+## 6. Endpoint Testing Guide
+
+The following commands walk through every endpoint. Run them in order in a single shell session.
+
+> **Prerequisite:** `docker compose up --build` is running and `http://localhost:8080/health` returns `{"data":{"status":"ok"}}`.
+
+### Step 1 — Health check
 
 ```bash
-# Register
-curl -X POST http://localhost:8080/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Jane","email":"jane@example.com","password":"secret123"}'
-# → {"data":{"token":"eyJ..."}}
+curl -s http://localhost:8080/health
+# {"data":{"status":"ok"}}
+```
 
-# Create a project (use token from above)
-curl -X POST http://localhost:8080/projects \
-  -H "Authorization: Bearer eyJ..." \
+### Step 2 — Register two users
+
+```bash
+# Register User A (will be the project owner)
+curl -s -X POST http://localhost:8080/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"name":"My Project","description":"First project"}'
-# → {"data":{"id":"...","name":"My Project",...}}
+  -d '{"name":"Alice","email":"alice@example.com","password":"password123"}'
+# {"data":{"token":"eyJ..."}}
+```
+
+Copy the token value, then:
+
+```bash
+TOKEN_A="eyJ..."   # paste token from above
+```
+
+```bash
+# Register User B (will be a non-owner)
+curl -s -X POST http://localhost:8080/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Bob","email":"bob@example.com","password":"password123"}'
+
+TOKEN_B="eyJ..."   # paste token from above
+```
+
+### Step 3 — Duplicate registration (expect 409)
+
+```bash
+curl -s -X POST http://localhost:8080/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Alice2","email":"alice@example.com","password":"password123"}'
+# {"error":"already exists"}
+```
+
+### Step 4 — Login
+
+```bash
+curl -s -X POST http://localhost:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alice@example.com","password":"password123"}'
+# {"data":{"token":"eyJ..."}}
+```
+
+### Step 5 — Wrong password (expect 401)
+
+```bash
+curl -s -X POST http://localhost:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alice@example.com","password":"wrongpassword"}'
+# {"error":"unauthorized"}
+```
+
+### Step 6 — Access protected route without token (expect 401)
+
+```bash
+curl -s http://localhost:8080/projects
+# {"error":"missing authorization header"}
+```
+
+### Step 7 — Create a project
+
+```bash
+curl -s -X POST http://localhost:8080/projects \
+  -H "Authorization: Bearer $TOKEN_A" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"My Project","description":"A sample project"}'
+# {"data":{"id":"<project_id>","name":"My Project",...}}
+```
+
+Copy the `id` value:
+
+```bash
+PROJECT_ID="<project_id>"   # paste id from above
+```
+
+### Step 8 — List projects
+
+```bash
+curl -s http://localhost:8080/projects \
+  -H "Authorization: Bearer $TOKEN_A"
+# {"data":[...],"meta":{"page":1,"limit":20,"total":1}}
+```
+
+### Step 9 — Get project by ID
+
+```bash
+curl -s http://localhost:8080/projects/$PROJECT_ID \
+  -H "Authorization: Bearer $TOKEN_A"
+# {"data":{"id":"...","name":"My Project",...}}
+```
+
+### Step 10 — Update project (owner only)
+
+```bash
+curl -s -X PUT http://localhost:8080/projects/$PROJECT_ID \
+  -H "Authorization: Bearer $TOKEN_A" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Renamed Project","description":"Updated description"}'
+# {"data":{"id":"...","name":"Renamed Project",...}}
+```
+
+### Step 11 — Update project as non-owner (expect 403)
+
+```bash
+curl -s -X PUT http://localhost:8080/projects/$PROJECT_ID \
+  -H "Authorization: Bearer $TOKEN_B" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Hijacked"}'
+# {"error":"forbidden"}
+```
+
+### Step 12 — Create tasks
+
+```bash
+# Task with only required field — status defaults to "todo", priority to "medium"
+curl -s -X POST http://localhost:8080/projects/$PROJECT_ID/tasks \
+  -H "Authorization: Bearer $TOKEN_A" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Fix login bug"}'
+# {"data":{"id":"<task1_id>","title":"Fix login bug","status":"todo","priority":"medium",...}}
+
+TASK1_ID="<task1_id>"
+```
+
+```bash
+# Task with all fields
+curl -s -X POST http://localhost:8080/projects/$PROJECT_ID/tasks \
+  -H "Authorization: Bearer $TOKEN_A" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Write integration tests",
+    "description": "Cover all endpoints",
+    "status": "in_progress",
+    "priority": "high",
+    "due_date": "2026-12-31T23:59:59Z"
+  }'
+# {"data":{"id":"<task2_id>","status":"in_progress","priority":"high",...}}
+
+TASK2_ID="<task2_id>"
+```
+
+### Step 13 — Task validation: missing title (expect 400)
+
+```bash
+curl -s -X POST http://localhost:8080/projects/$PROJECT_ID/tasks \
+  -H "Authorization: Bearer $TOKEN_A" \
+  -H "Content-Type: application/json" \
+  -d '{"description":"No title provided"}'
+# {"error":"validation failed","fields":{"title":"is required"}}
+```
+
+### Step 14 — List tasks
+
+```bash
+# All tasks in project
+curl -s "http://localhost:8080/projects/$PROJECT_ID/tasks" \
+  -H "Authorization: Bearer $TOKEN_A"
+# {"data":[...],"meta":{"page":1,"limit":20,"total":2}}
+```
+
+```bash
+# Filter by status
+curl -s "http://localhost:8080/projects/$PROJECT_ID/tasks?status=in_progress" \
+  -H "Authorization: Bearer $TOKEN_A"
+# Returns only in_progress tasks
+```
+
+```bash
+# Pagination
+curl -s "http://localhost:8080/projects/$PROJECT_ID/tasks?page=1&limit=1" \
+  -H "Authorization: Bearer $TOKEN_A"
+# {"data":[...],"meta":{"page":1,"limit":1,"total":2}}
+```
+
+### Step 15 — Get task by ID
+
+```bash
+curl -s http://localhost:8080/tasks/$TASK1_ID \
+  -H "Authorization: Bearer $TOKEN_A"
+# {"data":{"id":"...","title":"Fix login bug","status":"todo",...}}
+```
+
+### Step 16 — Partial update task (only changed fields)
+
+```bash
+curl -s -X PUT http://localhost:8080/tasks/$TASK1_ID \
+  -H "Authorization: Bearer $TOKEN_A" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"done"}'
+# {"data":{"id":"...","status":"done","priority":"medium",...}}
+# Note: priority is unchanged — only status was updated
+```
+
+### Step 17 — Get project stats
+
+```bash
+curl -s http://localhost:8080/projects/$PROJECT_ID/stats \
+  -H "Authorization: Bearer $TOKEN_A"
+# {"data":{"by_status":{"done":1,"in_progress":1},"by_assignee":{}}}
+```
+
+### Step 18 — Delete task as non-owner (expect 403)
+
+```bash
+curl -s -X DELETE http://localhost:8080/tasks/$TASK1_ID \
+  -H "Authorization: Bearer $TOKEN_B"
+# {"error":"forbidden"}
+```
+
+### Step 19 — Delete task as owner
+
+```bash
+curl -s -X DELETE http://localhost:8080/tasks/$TASK1_ID \
+  -H "Authorization: Bearer $TOKEN_A"
+# {"data":{"deleted":true}}
+```
+
+### Step 20 — Get deleted task (expect 404)
+
+```bash
+curl -s http://localhost:8080/tasks/$TASK1_ID \
+  -H "Authorization: Bearer $TOKEN_A"
+# {"error":"not found"}
+```
+
+### Step 21 — Delete project as non-owner (expect 403)
+
+```bash
+curl -s -X DELETE http://localhost:8080/projects/$PROJECT_ID \
+  -H "Authorization: Bearer $TOKEN_B"
+# {"error":"forbidden"}
+```
+
+### Step 22 — Delete project as owner
+
+```bash
+curl -s -X DELETE http://localhost:8080/projects/$PROJECT_ID \
+  -H "Authorization: Bearer $TOKEN_A"
+# {"data":{"deleted":true}}
+```
+
+### Step 23 — Get deleted project (expect 404)
+
+```bash
+curl -s http://localhost:8080/projects/$PROJECT_ID \
+  -H "Authorization: Bearer $TOKEN_A"
+# {"error":"not found"}
 ```
 
 ---
 
-## 7. What I'd Do With More Time
+## 7. Postman Collection
+
+A Postman collection is included in the repo: **[`taskflow.postman_collection.json`](taskflow.postman_collection.json)**
+
+**How to use it:**
+1. Open Postman → click **Import** → select `taskflow.postman_collection.json`
+2. Run **Auth → POST /auth/login** (uses seed credentials by default)
+3. The token is saved automatically into the `token` collection variable — all other requests are ready to fire
+4. Creating a project saves its ID into `project_id`; creating a task saves into `task_id` — no copy-pasting needed
+
+---
+
+## 8. What I'd Do With More Time
 
 **Rate limiting on auth endpoints**
 Login and register are the most abuse-prone endpoints. A token-bucket rate limiter (per-IP for login, global for register) as Gin middleware would be the first addition. Without it, the anti-enumeration protection on login is weakened by brute-force viability.

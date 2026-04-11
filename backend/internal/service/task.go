@@ -33,9 +33,14 @@ func (s *TaskService) Create(
 	builder := domain.NewTaskBuilder().
 		Title(title).
 		Description(description).
-		Status(status).
-		Priority(priority).
 		ProjectID(projectID)
+
+	if status != "" {
+		builder.Status(status)
+	}
+	if priority != "" {
+		builder.Priority(priority)
+	}
 
 	if assigneeID != nil {
 		builder.AssigneeID(*assigneeID)
@@ -111,6 +116,7 @@ func (s *TaskService) Update(
 		return nil, err
 	}
 
+	task.UpdatedAt = time.Now().UTC()
 	return task, nil
 }
 

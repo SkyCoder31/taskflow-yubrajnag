@@ -22,7 +22,7 @@ func NewRouter(
 	r.Use(gin.Recovery())
 
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
+		c.JSON(200, gin.H{"data": gin.H{"status": "ok"}})
 	})
 
 	authGroup := r.Group("/auth")
